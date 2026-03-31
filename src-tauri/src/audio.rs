@@ -1,6 +1,7 @@
 /// audio.rs — Microphone capture via cpal/WASAPI
 /// Emits `rms-level` (f32 0.0–1.0) each audio frame.
 /// Accumulates PCM samples for STT after recording ends.
+use crate::diag;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig, SupportedStreamConfig};
@@ -130,6 +131,7 @@ fn process_samples(
     samples_arc: &Arc<Mutex<Vec<f32>>>,
     app: &AppHandle,
 ) {
+    static RMS_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let mono = downmix_interleaved_to_mono(data, channels);
     samples_arc.lock().unwrap().extend_from_slice(&mono);
     let rms = if mono.is_empty() {
@@ -139,9 +141,13 @@ fn process_samples(
         (sq / mono.len() as f32).sqrt()
     };
     let level = (rms * 8.0_f32).min(1.0);
+    if level > 0.02 && !RMS_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        diag::write(&format!("audio:rms-first:{:.4}", level));
+    }
     if let Some(win) = app.get_webview_window("capsule") {
         let _ = win.emit("rms-level", level);
     }
+    let _ = app.emit("rms-level", level);
 }
 
 fn downmix_interleaved_to_mono(data: &[f32], channels: usize) -> Vec<f32> {

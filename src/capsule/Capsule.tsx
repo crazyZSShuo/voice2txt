@@ -24,15 +24,27 @@ function Waveform({ active }: { active: boolean }) {
   const rms = useRef(0);
   const raf = useRef(0);
   const on = useRef(active);
+  const logged = useRef(false);
 
   useEffect(() => {
     on.current = active;
-    if (!active) rms.current = 0;
+    if (!active) {
+      rms.current = 0;
+      logged.current = false;
+      env.current.fill(0);
+    }
   }, [active]);
 
   useEffect(() => {
     const p = listen<number>("rms-level", (e) => {
-      if (on.current) rms.current = e.payload;
+      if (!on.current) return;
+      rms.current = e.payload;
+      if (!logged.current && e.payload > 0.01) {
+        logged.current = true;
+        void invoke("capsule_frontend_log", {
+          message: `rms-first:${e.payload.toFixed(4)}`,
+        }).catch(() => {});
+      }
     });
     return () => { p.then((u) => u()); };
   }, []);
@@ -48,18 +60,22 @@ function Waveform({ active }: { active: boolean }) {
 
     const frame = () => {
       ctx.clearRect(0, 0, W, H);
+      const input = on.current ? Math.max(0, rms.current) : 0;
+      const boosted = Math.min(1, Math.pow(input, 0.32) * 2.6);
+
       for (let i = 0; i < BAR_COUNT; i++) {
-        const v = Math.min(1, Math.sqrt(Math.max(0, rms.current)));
-        const target = (on.current ? v : 0)
+        const targetLevel = boosted
           * BAR_WEIGHTS[i]
           * (1 + (Math.random() * 2 - 1) * JITTER);
         const prev = env.current[i];
-        env.current[i] = target > prev
-          ? prev + (target - prev) * ATTACK
-          : prev + (target - prev) * RELEASE;
+        env.current[i] = targetLevel > prev
+          ? prev + (targetLevel - prev) * ATTACK
+          : prev + (targetLevel - prev) * RELEASE;
 
         const e = env.current[i];
-        const barH = on.current ? Math.max(6, e * (H - 4)) : Math.max(0, e * H);
+        const barH = on.current
+          ? Math.max(8, 6 + e * (H - 8))
+          : Math.max(0, e * H);
         const x = gap + i * (barW + gap);
         const y = (H - barH) / 2;
 
@@ -110,6 +126,8 @@ export default function Capsule() {
 
   // Language
   useEffect(() => {
+    void invoke("capsule_frontend_log", { message: "mounted" }).catch(() => {});
+    void invoke("capsule_frontend_log", { message: "initial-phase:idle" }).catch(() => {});
     invoke<{ language: string }>("get_config")
       .then((c) => setLang(c.language === "zh" ? "zh-CN" : c.language || "zh-CN"))
       .catch(() => {});
