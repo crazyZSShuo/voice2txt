@@ -1,0 +1,155 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   VoiceInput Capsule HUD
+   The capsule fills the ENTIRE Tauri window. The window IS the capsule.
+   Window size is controlled by Rust + sync_capsule_window().
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bar-top: #8b8eff;
+  --bar-bottom: #6366f1;
+  --dot-color: #ef4455;
+  --text-primary: #eceeff;
+  --text-dim: rgba(200, 204, 228, 0.6);
+  --bg: rgba(20, 22, 36, 0.88);
+  --border: rgba(255, 255, 255, 0.08);
+  --pill-bg: rgba(255, 255, 255, 0.06);
+  --pill-border: rgba(255, 255, 255, 0.10);
+  --pill-text: rgba(190, 196, 220, 0.72);
+}
+
+/* ── The capsule fills the entire window ────────────────────────────────── */
+.capsule {
+  /* Absolute fill — no gap between window and content */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+
+  border-radius: 28px;
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+
+  background: var(--bg);
+  border: 0.5px solid var(--border);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.06),
+    0 8px 32px rgba(0, 0, 0, 0.35),
+    0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+/* ── Entry / Exit ──────────────────────────────────────────────────────── */
+.capsule--enter {
+  animation: capIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.capsule--exit {
+  animation: capOut 0.22s ease-in both;
+}
+
+@keyframes capIn {
+  from { opacity: 0; transform: scale(0.85) translateY(10px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes capOut {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to   { opacity: 0; transform: scale(0.88) translateY(6px); }
+}
+
+/* ── Left: recording dot + waveform ────────────────────────────────────── */
+.cap-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 20px;
+  padding-right: 14px;
+  flex-shrink: 0;
+  height: 100%;
+}
+
+/* Red recording dot */
+.cap-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dot-color);
+  box-shadow: 0 0 6px rgba(239, 68, 85, 0.45);
+  flex-shrink: 0;
+}
+.cap-dot--on {
+  animation: dotPulse 1.5s ease-in-out infinite;
+}
+@keyframes dotPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 6px rgba(239, 68, 85, 0.45);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.7);
+    box-shadow: 0 0 3px rgba(239, 68, 85, 0.2);
+  }
+}
+
+/* Waveform canvas */
+.cap-wave {
+  width: 44px;
+  height: 32px;
+  display: block;
+  flex-shrink: 0;
+}
+
+/* ── Center: transcript text ───────────────────────────────────────────── */
+.cap-text {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding-right: 8px;
+
+  font-family: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+.cap-text--dim  { color: var(--text-dim); }
+.cap-text--blink {
+  animation: blink 1.2s ease-in-out infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 0.75; }
+  50%      { opacity: 0.35; }
+}
+
+/* ── Right: language pill ──────────────────────────────────────────────── */
+.cap-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 10px;
+  margin-right: 18px;
+  flex-shrink: 0;
+
+  border-radius: 12px;
+  background: var(--pill-bg);
+  border: 1px solid var(--pill-border);
+  color: var(--pill-text);
+
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  white-space: nowrap;
+}

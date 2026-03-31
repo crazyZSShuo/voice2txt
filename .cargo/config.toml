@@ -1,0 +1,8 @@
+# 为 Windows MSVC 目标使用 xwin 提供的 MSVC SDK
+[target.x86_64-pc-windows-msvc]
+# cargo-xwin 会在编译时自动注入正确的 linker 和 lib 路径
+# 无需手动指定 linker
+
+[env]
+# 告知 windows-rs 使用 xwin 的 SDK
+XWIN_ARCH = "x86_64"

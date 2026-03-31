@@ -1,0 +1,57 @@
+[package]
+name = "voice-input"
+version = "0.1.0"
+description = "Windows system tray voice input application"
+authors = []
+edition = "2021"
+
+[[bin]]
+name = "voice-input"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+cpal = "0.15"
+arboard = "3.4"
+window-vibrancy = "0.5"
+log = "0.4"
+env_logger = "0.11"
+base64 = "0.22"
+futures-util = "0.3"
+bytes = "1"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Input_Ime",
+  "Win32_System_DataExchange",
+  "Win32_System_Registry",
+  "Win32_System_Memory",
+  "Win32_Security_Cryptography",
+]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+local-whisper = []
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
