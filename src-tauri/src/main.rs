@@ -44,6 +44,8 @@ fn get_config(state: State<'_, AppState>) -> config::AppConfig {
 
 #[tauri::command]
 fn save_config(new_cfg: config::AppConfig, state: State<'_, AppState>) -> Result<(), String> {
+    let backend = stt_router::selected_backend(&new_cfg);
+    stt_router::ensure_backend_supported(backend).map_err(|e| e.to_string())?;
     config::save_config(&new_cfg).map_err(|e| e.to_string())?;
     *state.inner().0.config.lock().unwrap() = new_cfg;
     Ok(())

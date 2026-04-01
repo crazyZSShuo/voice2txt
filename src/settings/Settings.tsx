@@ -249,7 +249,11 @@ export default function Settings() {
         <Field label="Backend">
           <select
             value={cfg.stt_backend}
-            onChange={(e) => setCfg((c) => c && { ...c, stt_backend: e.target.value as SttBackend })}
+            onChange={(e) => {
+              setSttStatus("idle");
+              setSttMsg("");
+              setCfg((c) => c && { ...c, stt_backend: e.target.value as SttBackend });
+            }}
             style={{
               flex: 1,
               background: "rgba(255,255,255,0.06)",
