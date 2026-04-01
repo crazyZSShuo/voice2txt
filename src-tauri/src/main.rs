@@ -25,7 +25,7 @@ pub struct SharedState {
     pub config: Arc<Mutex<config::AppConfig>>,
     pub audio: Arc<Mutex<audio::AudioCapture>>,
     pub windows_speech_session: Arc<Mutex<Option<windows_stt::WindowsSpeechSession>>>,
-    pub recording: Arc<Mutex<bool>>,
+    recording: Arc<Mutex<RecordingState>>,
     pub capsule_phase: Arc<Mutex<String>>,
     pub capsule_loaded: Arc<Mutex<bool>>,
 }
@@ -112,26 +112,196 @@ where
 
 // ── Recording flow ────────────────────────────────────────────────────────────
 
-fn start_recording(app: AppHandle, shared: SharedState) {
-    diag::write("event:start_recording:enter");
-    {
-        let mut rec = shared.recording.lock().unwrap();
-        if *rec {
-            diag::write("event:start_recording:ignored_already_recording");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingState {
+    Idle,
+    CustomRecording,
+    WindowsStarting,
+    WindowsStopRequested,
+    WindowsRecording,
+    WindowsStopping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartAction {
+    IgnoreAlreadyRecording,
+    StartCustom,
+    StartWindows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopAction {
+    IgnoreNotRecording,
+    StopCustomSynchronously,
+    AwaitWindowsStartupThenStop,
+    StopWindowsSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsStartAction {
+    EnterRecording,
+    StopImmediately,
+}
+
+fn begin_recording(state: &mut RecordingState, backend: config::SttBackend) -> StartAction {
+    match *state {
+        RecordingState::Idle => match backend {
+            config::SttBackend::Custom => {
+                *state = RecordingState::CustomRecording;
+                StartAction::StartCustom
+            }
+            config::SttBackend::WindowsSpeech => {
+                *state = RecordingState::WindowsStarting;
+                StartAction::StartWindows
+            }
+        },
+        _ => StartAction::IgnoreAlreadyRecording,
+    }
+}
+
+fn reset_recording_state(state: &mut RecordingState) {
+    *state = RecordingState::Idle;
+}
+
+fn request_stop(state: &mut RecordingState) -> StopAction {
+    match *state {
+        RecordingState::Idle | RecordingState::WindowsStopping => StopAction::IgnoreNotRecording,
+        RecordingState::CustomRecording => StopAction::StopCustomSynchronously,
+        RecordingState::WindowsStarting => {
+            *state = RecordingState::WindowsStopRequested;
+            StopAction::AwaitWindowsStartupThenStop
+        }
+        RecordingState::WindowsStopRequested => StopAction::IgnoreNotRecording,
+        RecordingState::WindowsRecording => {
+            *state = RecordingState::WindowsStopping;
+            StopAction::StopWindowsSession
+        }
+    }
+}
+
+fn finish_custom_stop(state: &mut RecordingState) {
+    if matches!(*state, RecordingState::CustomRecording) {
+        *state = RecordingState::Idle;
+    }
+}
+
+fn resolve_windows_start_success(state: &mut RecordingState) -> WindowsStartAction {
+    match *state {
+        RecordingState::WindowsStarting => {
+            *state = RecordingState::WindowsRecording;
+            WindowsStartAction::EnterRecording
+        }
+        RecordingState::WindowsStopRequested => {
+            *state = RecordingState::WindowsStopping;
+            WindowsStartAction::StopImmediately
+        }
+        _ => {
+            *state = RecordingState::WindowsStopping;
+            WindowsStartAction::StopImmediately
+        }
+    }
+}
+
+fn finish_windows_stop(state: &mut RecordingState) {
+    if matches!(*state, RecordingState::WindowsStopping) {
+        *state = RecordingState::Idle;
+    }
+}
+
+fn announce_processing(shared: &SharedState, app: &AppHandle) {
+    diag::write("event:stop_recording:task_started");
+    set_capsule_phase(shared, "processing");
+    emit_capsule_event(app, "processing-started", ());
+}
+
+async fn finalize_recording(
+    app: AppHandle,
+    shared: SharedState,
+    cfg: config::AppConfig,
+    transcript: anyhow::Result<String>,
+) {
+    let transcript = match transcript {
+        Ok(t) => t,
+        Err(e) => {
+            set_capsule_phase(&shared, "error");
+            diag::write(&format!("event:stt:error:{}", e));
+            log::error!("STT: {}", e);
+            emit_capsule_event(&app, "recording-error", e.to_string());
+            hide_capsule(&app);
             return;
         }
-        *rec = true;
+    };
+    diag::write(&format!("event:stt:done:chars={}", transcript.len()));
+
+    if transcript.trim().is_empty() {
+        diag::write("event:stt:empty_transcript");
+        set_capsule_phase(&shared, "idle");
+        hide_capsule(&app);
+        return;
     }
+
+    let final_text = if cfg.llm.enabled && !cfg.llm.api_key.is_empty() {
+        diag::write("event:llm:start");
+        set_capsule_phase(&shared, "refining");
+        emit_capsule_event(&app, "refining-started", ());
+        emit_capsule_event(&app, "transcript-clear", ());
+        match llm::refine_transcript(&transcript, &cfg.llm, &app).await {
+            Ok(r) if !r.trim().is_empty() => {
+                diag::write(&format!("event:llm:done:chars={}", r.len()));
+                r
+            }
+            _ => {
+                diag::write("event:llm:fallback_to_transcript");
+                transcript
+            }
+        }
+    } else {
+        diag::write("event:llm:disabled");
+        transcript
+    };
+
+    emit_capsule_event(&app, "injecting", final_text.clone());
+    diag::write(&format!("event:inject:start:chars={}", final_text.len()));
+    if let Err(e) = inject::inject_text(&final_text).await {
+        set_capsule_phase(&shared, "error");
+        diag::write(&format!("event:inject:error:{}", e));
+        log::error!("Inject: {}", e);
+        emit_capsule_event(&app, "recording-error", e.to_string());
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+    } else {
+        diag::write("event:inject:done");
+        set_capsule_phase(&shared, "done");
+        emit_capsule_event(&app, "recording-done", final_text.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    hide_capsule(&app);
+    diag::write("event:stop_recording:task_finished");
+    set_capsule_phase(&shared, "idle");
+}
+
+fn start_recording(app: AppHandle, shared: SharedState) {
+    diag::write("event:start_recording:enter");
     let cfg = shared.config.lock().unwrap().clone();
     let backend = stt_router::selected_backend(&cfg);
     if let Err(e) = stt_router::ensure_backend_supported(backend) {
-        *shared.recording.lock().unwrap() = false;
         set_capsule_phase(&shared, "error");
         emit_capsule_event(&app, "recording-error", e.to_string());
         return;
     }
 
-    if stt_router::backend_uses_local_audio_capture(backend) {
+    let start_action = {
+        let mut rec = shared.recording.lock().unwrap();
+        let action = begin_recording(&mut rec, backend);
+        if matches!(action, StartAction::IgnoreAlreadyRecording) {
+            diag::write("event:start_recording:ignored_already_recording");
+        }
+        action
+    };
+    if matches!(start_action, StartAction::IgnoreAlreadyRecording) {
+        return;
+    }
+
+    if matches!(start_action, StartAction::StartCustom) {
         let mut audio = shared.audio.lock().unwrap();
         match audio.start(app.clone()) {
             Ok(_) => {
@@ -145,7 +315,7 @@ fn start_recording(app: AppHandle, shared: SharedState) {
                 diag::write("event:start_recording:emitted_recording_started");
             }
             Err(e) => {
-                *shared.recording.lock().unwrap() = false;
+                reset_recording_state(&mut shared.recording.lock().unwrap());
                 set_capsule_phase(&shared, "error");
                 diag::write(&format!("event:start_recording:error:{}", e));
                 log::error!("Audio start: {}", e);
@@ -161,20 +331,37 @@ fn start_recording(app: AppHandle, shared: SharedState) {
 
     let app2 = app.clone();
     let shared2 = shared.clone();
+    let cfg2 = cfg.clone();
     tauri::async_runtime::spawn(async move {
         match windows_stt::start_recognition(&app2).await {
             Ok(session) => {
-                *shared2.windows_speech_session.lock().unwrap() = Some(session);
-                set_capsule_phase(&shared2, "recording");
-                if let Some(win) = app2.get_webview_window("capsule") {
-                    position_capsule(&win);
-                    let _ = win.show();
+                let start_action = {
+                    let mut recording = shared2.recording.lock().unwrap();
+                    resolve_windows_start_success(&mut recording)
+                };
+
+                match start_action {
+                    WindowsStartAction::EnterRecording => {
+                        *shared2.windows_speech_session.lock().unwrap() = Some(session);
+                        set_capsule_phase(&shared2, "recording");
+                        if let Some(win) = app2.get_webview_window("capsule") {
+                            position_capsule(&win);
+                            let _ = win.show();
+                        }
+                        emit_capsule_event(&app2, "recording-started", ());
+                        diag::write("event:start_recording:windows_started");
+                    }
+                    WindowsStartAction::StopImmediately => {
+                        diag::write("event:start_recording:windows_quick_release");
+                        announce_processing(&shared2, &app2);
+                        let transcript = windows_stt::stop_recognition(session, &app2).await;
+                        finish_windows_stop(&mut shared2.recording.lock().unwrap());
+                        finalize_recording(app2, shared2, cfg2, transcript).await;
+                    }
                 }
-                emit_capsule_event(&app2, "recording-started", ());
-                diag::write("event:start_recording:windows_started");
             }
             Err(e) => {
-                *shared2.recording.lock().unwrap() = false;
+                reset_recording_state(&mut shared2.recording.lock().unwrap());
                 set_capsule_phase(&shared2, "error");
                 diag::write(&format!("event:start_recording:error:{}", e));
                 log::error!("Windows speech start: {}", e);
@@ -190,106 +377,60 @@ fn start_recording(app: AppHandle, shared: SharedState) {
 
 fn stop_recording(app: AppHandle, shared: SharedState) {
     diag::write("event:stop_recording:enter");
-    {
+    let stop_action = {
         let mut rec = shared.recording.lock().unwrap();
-        if !*rec {
+        let action = request_stop(&mut rec);
+        if matches!(action, StopAction::IgnoreNotRecording) {
             diag::write("event:stop_recording:ignored_not_recording");
-            return;
         }
-        *rec = false;
+        action
+    };
+    if matches!(stop_action, StopAction::IgnoreNotRecording) {
+        return;
     }
+
     let cfg = shared.config.lock().unwrap().clone();
-    let backend = stt_router::selected_backend(&cfg);
-    let app2 = app.clone();
-    let shared2 = shared.clone();
+    match stop_action {
+        StopAction::IgnoreNotRecording => {}
+        StopAction::AwaitWindowsStartupThenStop => {
+            diag::write("event:stop_recording:waiting_for_windows_start");
+        }
+        StopAction::StopCustomSynchronously => {
+            let samples = shared.audio.lock().unwrap().stop();
+            diag::write(&format!("event:stop_recording:samples={}", samples.len()));
+            finish_custom_stop(&mut shared.recording.lock().unwrap());
 
-    tauri::async_runtime::spawn(async move {
-        diag::write("event:stop_recording:task_started");
-        set_capsule_phase(&shared2, "processing");
-        emit_capsule_event(&app2, "processing-started", ());
-
-        let transcript = match backend {
-            config::SttBackend::Custom => {
-                let samples = shared2.audio.lock().unwrap().stop();
-                diag::write(&format!("event:stop_recording:samples={}", samples.len()));
+            let app2 = app.clone();
+            let shared2 = shared.clone();
+            tauri::async_runtime::spawn(async move {
+                announce_processing(&shared2, &app2);
                 let wav = audio::pcm_to_wav(&samples);
                 diag::write(&format!("event:stt:start:wav_bytes={}", wav.len()));
-                stt::transcribe_streaming(wav, &cfg.stt, &cfg.language, &app2).await
-            }
-            config::SttBackend::WindowsSpeech => {
-                let session = shared2
-                    .windows_speech_session
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .ok_or_else(|| anyhow::anyhow!("Windows speech session was not started"));
-                match session {
+                let transcript =
+                    stt::transcribe_streaming(wav, &cfg.stt, &cfg.language, &app2).await;
+                finalize_recording(app2, shared2, cfg, transcript).await;
+            });
+        }
+        StopAction::StopWindowsSession => {
+            let session = shared
+                .windows_speech_session
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Windows speech session was not started"));
+            let app2 = app.clone();
+            let shared2 = shared.clone();
+            tauri::async_runtime::spawn(async move {
+                announce_processing(&shared2, &app2);
+                let transcript = match session {
                     Ok(session) => windows_stt::stop_recognition(session, &app2).await,
                     Err(err) => Err(err),
-                }
-            }
-        };
-
-        let transcript = match transcript {
-            Ok(t) => t,
-            Err(e) => {
-                set_capsule_phase(&shared2, "error");
-                diag::write(&format!("event:stt:error:{}", e));
-                log::error!("STT: {}", e);
-                emit_capsule_event(&app2, "recording-error", e.to_string());
-                hide_capsule(&app2);
-                return;
-            }
-        };
-        diag::write(&format!("event:stt:done:chars={}", transcript.len()));
-
-        if transcript.trim().is_empty() {
-            diag::write("event:stt:empty_transcript");
-            set_capsule_phase(&shared2, "idle");
-            hide_capsule(&app2);
-            return;
+                };
+                finish_windows_stop(&mut shared2.recording.lock().unwrap());
+                finalize_recording(app2, shared2, cfg, transcript).await;
+            });
         }
-
-        let final_text = if cfg.llm.enabled && !cfg.llm.api_key.is_empty() {
-            diag::write("event:llm:start");
-            set_capsule_phase(&shared2, "refining");
-            emit_capsule_event(&app2, "refining-started", ());
-            emit_capsule_event(&app2, "transcript-clear", ());
-            match llm::refine_transcript(&transcript, &cfg.llm, &app2).await {
-                Ok(r) if !r.trim().is_empty() => {
-                    diag::write(&format!("event:llm:done:chars={}", r.len()));
-                    r
-                }
-                _ => {
-                    diag::write("event:llm:fallback_to_transcript");
-                    transcript
-                }
-            }
-        } else {
-            diag::write("event:llm:disabled");
-            transcript
-        };
-
-        emit_capsule_event(&app2, "injecting", final_text.clone());
-        diag::write(&format!("event:inject:start:chars={}", final_text.len()));
-        if let Err(e) = inject::inject_text(&final_text).await {
-            set_capsule_phase(&shared2, "error");
-            diag::write(&format!("event:inject:error:{}", e));
-            log::error!("Inject: {}", e);
-            emit_capsule_event(&app2, "recording-error", e.to_string());
-            // Allow error animation to play before hiding
-            tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
-        } else {
-            diag::write("event:inject:done");
-            set_capsule_phase(&shared2, "done");
-            emit_capsule_event(&app2, "recording-done", final_text.clone());
-            // Allow exit animation to complete before hiding
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        }
-        hide_capsule(&app2);
-        diag::write("event:stop_recording:task_finished");
-        set_capsule_phase(&shared2, "idle");
-    });
+    }
 }
 
 fn hide_capsule(app: &AppHandle) {
@@ -523,7 +664,7 @@ fn main() {
             config: Arc::new(Mutex::new(initial_cfg.clone())),
             audio: Arc::new(Mutex::new(audio::AudioCapture::new())),
             windows_speech_session: Arc::new(Mutex::new(None)),
-            recording: Arc::new(Mutex::new(false)),
+            recording: Arc::new(Mutex::new(RecordingState::Idle)),
             capsule_phase: Arc::new(Mutex::new("idle".to_string())),
             capsule_loaded: Arc::new(Mutex::new(false)),
         }))
@@ -599,4 +740,59 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("Tauri runtime error");
+}
+
+#[cfg(test)]
+mod recording_state_tests {
+    use super::*;
+
+    #[test]
+    fn custom_stop_stays_busy_until_sync_harvest_finishes() {
+        let mut state = RecordingState::CustomRecording;
+
+        assert_eq!(
+            request_stop(&mut state),
+            StopAction::StopCustomSynchronously
+        );
+        assert_eq!(state, RecordingState::CustomRecording);
+
+        finish_custom_stop(&mut state);
+
+        assert_eq!(state, RecordingState::Idle);
+    }
+
+    #[test]
+    fn windows_quick_release_waits_for_start_and_then_stops() {
+        let mut state = RecordingState::WindowsStarting;
+
+        assert_eq!(
+            request_stop(&mut state),
+            StopAction::AwaitWindowsStartupThenStop
+        );
+        assert_eq!(state, RecordingState::WindowsStopRequested);
+
+        assert_eq!(
+            resolve_windows_start_success(&mut state),
+            WindowsStartAction::StopImmediately
+        );
+        assert_eq!(state, RecordingState::WindowsStopping);
+    }
+
+    #[test]
+    fn start_requests_only_begin_from_idle() {
+        let mut idle = RecordingState::Idle;
+        let mut busy = RecordingState::WindowsRecording;
+
+        assert_eq!(
+            begin_recording(&mut idle, config::SttBackend::Custom),
+            StartAction::StartCustom
+        );
+        assert_eq!(idle, RecordingState::CustomRecording);
+
+        assert_eq!(
+            begin_recording(&mut busy, config::SttBackend::Custom),
+            StartAction::IgnoreAlreadyRecording
+        );
+        assert_eq!(busy, RecordingState::WindowsRecording);
+    }
 }
