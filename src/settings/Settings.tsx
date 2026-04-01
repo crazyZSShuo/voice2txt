@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -167,6 +167,7 @@ export default function Settings() {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [sttMsg, setSttMsg] = useState("");
   const [llmMsg, setLlmMsg] = useState("");
+  const sttTestGeneration = useRef(0);
 
   useEffect(() => {
     invoke<AppConfig>("get_config").then(setCfg);
@@ -186,6 +187,12 @@ export default function Settings() {
   const updateLlm = (patch: Partial<LlmConfig>) =>
     setCfg((c) => c && { ...c, llm: { ...c.llm, ...patch } });
 
+  const resetSttTestFeedback = () => {
+    sttTestGeneration.current += 1;
+    setSttStatus("idle");
+    setSttMsg("");
+  };
+
   const handleSave = async () => {
     setSaveStatus("saving");
     try {
@@ -199,17 +206,29 @@ export default function Settings() {
   };
 
   const handleTestStt = async () => {
+    const generation = sttTestGeneration.current + 1;
+    sttTestGeneration.current = generation;
     setSttStatus("testing");
     setSttMsg("");
     try {
       const msg = await invoke<string>("test_stt", { cfg });
+      if (sttTestGeneration.current !== generation) {
+        return;
+      }
       setSttMsg(msg);
       setSttStatus("ok");
     } catch (e) {
+      if (sttTestGeneration.current !== generation) {
+        return;
+      }
       setSttMsg(String(e));
       setSttStatus("error");
     }
-    setTimeout(() => setSttStatus("idle"), 5000);
+    setTimeout(() => {
+      if (sttTestGeneration.current === generation) {
+        setSttStatus("idle");
+      }
+    }, 5000);
   };
 
   const handleTestLlm = async () => {
@@ -250,8 +269,7 @@ export default function Settings() {
           <select
             value={cfg.stt_backend}
             onChange={(e) => {
-              setSttStatus("idle");
-              setSttMsg("");
+              resetSttTestFeedback();
               setCfg((c) => c && { ...c, stt_backend: e.target.value as SttBackend });
             }}
             style={{
