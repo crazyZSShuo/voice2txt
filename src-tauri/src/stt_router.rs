@@ -1,4 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
+
+#[cfg(not(target_os = "windows"))]
+use anyhow::bail;
 
 use crate::config::{AppConfig, SttBackend};
 
@@ -10,9 +13,9 @@ pub fn backend_uses_local_audio_capture(backend: SttBackend) -> bool {
     matches!(backend, SttBackend::Custom)
 }
 
-pub fn ensure_backend_supported(backend: SttBackend) -> Result<()> {
+pub fn ensure_backend_supported(_backend: SttBackend) -> Result<()> {
     #[cfg(not(target_os = "windows"))]
-    if backend == SttBackend::WindowsSpeech {
+    if _backend == SttBackend::WindowsSpeech {
         bail!("Windows SpeechRecognizer is only available on Windows builds");
     }
 
@@ -35,9 +38,7 @@ mod tests {
     #[test]
     fn windows_backend_does_not_use_local_audio_capture() {
         assert!(backend_uses_local_audio_capture(SttBackend::Custom));
-        assert!(!backend_uses_local_audio_capture(
-            SttBackend::WindowsSpeech
-        ));
+        assert!(!backend_uses_local_audio_capture(SttBackend::WindowsSpeech));
     }
 
     #[test]

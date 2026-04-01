@@ -33,6 +33,7 @@ bytes = "1"
 version = "0.58"
 features = [
   "Foundation",
+  "Foundation_Collections",
   "Globalization",
   "Media_SpeechRecognition",
   "Win32_Foundation",
