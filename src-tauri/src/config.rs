@@ -3,6 +3,27 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SttBackend {
+    WindowsSpeech,
+    Custom,
+}
+
+impl Default for SttBackend {
+    fn default() -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            SttBackend::WindowsSpeech
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            SttBackend::Custom
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SttConfig {
     pub base_url: String,
@@ -20,6 +41,8 @@ pub struct LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub stt_backend: SttBackend,
     pub language: String,
     pub auto_start: bool,
     pub stt: SttConfig,
@@ -29,6 +52,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            stt_backend: SttBackend::default(),
             language: "zh".to_string(),
             auto_start: false,
             stt: SttConfig {
@@ -218,4 +242,60 @@ pub fn set_auto_start(enabled: bool, exe_path: &str) -> Result<()> {
 #[cfg(not(target_os = "windows"))]
 pub fn set_auto_start(_enabled: bool, _exe_path: &str) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_backend_matches_platform() {
+        let cfg = AppConfig::default();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(cfg.stt_backend, SttBackend::WindowsSpeech);
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(cfg.stt_backend, SttBackend::Custom);
+    }
+
+    #[test]
+    fn missing_backend_field_uses_default() {
+        let json = r#"
+        {
+          "language": "zh",
+          "auto_start": false,
+          "stt": {
+            "base_url": "https://api.openai.com",
+            "api_key": "",
+            "model": "whisper-1"
+          },
+          "llm": {
+            "enabled": false,
+            "base_url": "https://api.openai.com",
+            "api_key": "",
+            "model": "gpt-4o-mini"
+          }
+        }
+        "#;
+
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(cfg.stt_backend, SttBackend::WindowsSpeech);
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(cfg.stt_backend, SttBackend::Custom);
+    }
+
+    #[test]
+    fn backend_round_trips_through_json() {
+        let mut cfg = AppConfig::default();
+        cfg.stt_backend = SttBackend::Custom;
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let decoded: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.stt_backend, SttBackend::Custom);
+    }
 }
