@@ -8,6 +8,8 @@ mod hotkey;
 mod inject;
 mod llm;
 mod stt;
+mod stt_router;
+mod windows_stt;
 
 use std::sync::{Arc, Mutex};
 use tauri::{
@@ -22,6 +24,7 @@ use tauri::{
 pub struct SharedState {
     pub config: Arc<Mutex<config::AppConfig>>,
     pub audio: Arc<Mutex<audio::AudioCapture>>,
+    pub windows_speech_session: Arc<Mutex<Option<windows_stt::WindowsSpeechSession>>>,
     pub recording: Arc<Mutex<bool>>,
     pub capsule_phase: Arc<Mutex<String>>,
     pub capsule_loaded: Arc<Mutex<bool>>,
@@ -119,30 +122,70 @@ fn start_recording(app: AppHandle, shared: SharedState) {
         }
         *rec = true;
     }
-    let mut audio = shared.audio.lock().unwrap();
-    match audio.start(app.clone()) {
-        Ok(_) => {
-            diag::write("event:start_recording:audio_started");
-            set_capsule_phase(&shared, "recording");
-            if let Some(win) = app.get_webview_window("capsule") {
-                position_capsule(&win);
-                let _ = win.show();
-            }
-            emit_capsule_event(&app, "recording-started", ());
-            diag::write("event:start_recording:emitted_recording_started");
-        }
-        Err(e) => {
-            *shared.recording.lock().unwrap() = false;
-            set_capsule_phase(&shared, "error");
-            diag::write(&format!("event:start_recording:error:{}", e));
-            log::error!("Audio start: {}", e);
-            if let Some(win) = app.get_webview_window("capsule") {
-                position_capsule(&win);
-                let _ = win.show();
-            }
-            emit_capsule_event(&app, "recording-error", e.to_string());
-        }
+    let cfg = shared.config.lock().unwrap().clone();
+    let backend = stt_router::selected_backend(&cfg);
+    if let Err(e) = stt_router::ensure_backend_supported(backend) {
+        *shared.recording.lock().unwrap() = false;
+        set_capsule_phase(&shared, "error");
+        emit_capsule_event(&app, "recording-error", e.to_string());
+        return;
     }
+
+    if stt_router::backend_uses_local_audio_capture(backend) {
+        let mut audio = shared.audio.lock().unwrap();
+        match audio.start(app.clone()) {
+            Ok(_) => {
+                diag::write("event:start_recording:audio_started");
+                set_capsule_phase(&shared, "recording");
+                if let Some(win) = app.get_webview_window("capsule") {
+                    position_capsule(&win);
+                    let _ = win.show();
+                }
+                emit_capsule_event(&app, "recording-started", ());
+                diag::write("event:start_recording:emitted_recording_started");
+            }
+            Err(e) => {
+                *shared.recording.lock().unwrap() = false;
+                set_capsule_phase(&shared, "error");
+                diag::write(&format!("event:start_recording:error:{}", e));
+                log::error!("Audio start: {}", e);
+                if let Some(win) = app.get_webview_window("capsule") {
+                    position_capsule(&win);
+                    let _ = win.show();
+                }
+                emit_capsule_event(&app, "recording-error", e.to_string());
+            }
+        }
+        return;
+    }
+
+    let app2 = app.clone();
+    let shared2 = shared.clone();
+    tauri::async_runtime::spawn(async move {
+        match windows_stt::start_recognition(&app2).await {
+            Ok(session) => {
+                *shared2.windows_speech_session.lock().unwrap() = Some(session);
+                set_capsule_phase(&shared2, "recording");
+                if let Some(win) = app2.get_webview_window("capsule") {
+                    position_capsule(&win);
+                    let _ = win.show();
+                }
+                emit_capsule_event(&app2, "recording-started", ());
+                diag::write("event:start_recording:windows_started");
+            }
+            Err(e) => {
+                *shared2.recording.lock().unwrap() = false;
+                set_capsule_phase(&shared2, "error");
+                diag::write(&format!("event:start_recording:error:{}", e));
+                log::error!("Windows speech start: {}", e);
+                if let Some(win) = app2.get_webview_window("capsule") {
+                    position_capsule(&win);
+                    let _ = win.show();
+                }
+                emit_capsule_event(&app2, "recording-error", e.to_string());
+            }
+        }
+    });
 }
 
 fn stop_recording(app: AppHandle, shared: SharedState) {
@@ -155,21 +198,39 @@ fn stop_recording(app: AppHandle, shared: SharedState) {
         }
         *rec = false;
     }
-    let samples = shared.audio.lock().unwrap().stop();
-    diag::write(&format!("event:stop_recording:samples={}", samples.len()));
     let cfg = shared.config.lock().unwrap().clone();
+    let backend = stt_router::selected_backend(&cfg);
     let app2 = app.clone();
     let shared2 = shared.clone();
 
     tauri::async_runtime::spawn(async move {
         diag::write("event:stop_recording:task_started");
         set_capsule_phase(&shared2, "processing");
-        let wav = audio::pcm_to_wav(&samples);
         emit_capsule_event(&app2, "processing-started", ());
-        diag::write(&format!("event:stt:start:wav_bytes={}", wav.len()));
 
-        let transcript = match stt::transcribe_streaming(wav, &cfg.stt, &cfg.language, &app2).await
-        {
+        let transcript = match backend {
+            config::SttBackend::Custom => {
+                let samples = shared2.audio.lock().unwrap().stop();
+                diag::write(&format!("event:stop_recording:samples={}", samples.len()));
+                let wav = audio::pcm_to_wav(&samples);
+                diag::write(&format!("event:stt:start:wav_bytes={}", wav.len()));
+                stt::transcribe_streaming(wav, &cfg.stt, &cfg.language, &app2).await
+            }
+            config::SttBackend::WindowsSpeech => {
+                let session = shared2
+                    .windows_speech_session
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Windows speech session was not started"));
+                match session {
+                    Ok(session) => windows_stt::stop_recognition(session, &app2).await,
+                    Err(err) => Err(err),
+                }
+            }
+        };
+
+        let transcript = match transcript {
             Ok(t) => t,
             Err(e) => {
                 set_capsule_phase(&shared2, "error");
@@ -461,6 +522,7 @@ fn main() {
         .manage(AppState(SharedState {
             config: Arc::new(Mutex::new(initial_cfg.clone())),
             audio: Arc::new(Mutex::new(audio::AudioCapture::new())),
+            windows_speech_session: Arc::new(Mutex::new(None)),
             recording: Arc::new(Mutex::new(false)),
             capsule_phase: Arc::new(Mutex::new("idle".to_string())),
             capsule_loaded: Arc::new(Mutex::new(false)),
