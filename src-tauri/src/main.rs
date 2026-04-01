@@ -143,6 +143,11 @@ enum WindowsStartAction {
     StopImmediately,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingUiContract {
+    ShowCapsuleAndEmitStarted,
+}
+
 fn begin_recording(state: &mut RecordingState, backend: config::SttBackend) -> StartAction {
     match *state {
         RecordingState::Idle => match backend {
@@ -205,6 +210,37 @@ fn resolve_windows_start_success(state: &mut RecordingState) -> WindowsStartActi
 fn finish_windows_stop(state: &mut RecordingState) {
     if matches!(*state, RecordingState::WindowsStopping) {
         *state = RecordingState::Idle;
+    }
+}
+
+fn recording_ui_contract(
+    backend: config::SttBackend,
+    windows_start_action: WindowsStartAction,
+) -> RecordingUiContract {
+    match backend {
+        config::SttBackend::Custom => RecordingUiContract::ShowCapsuleAndEmitStarted,
+        config::SttBackend::WindowsSpeech => match windows_start_action {
+            WindowsStartAction::EnterRecording | WindowsStartAction::StopImmediately => {
+                RecordingUiContract::ShowCapsuleAndEmitStarted
+            }
+        },
+    }
+}
+
+fn apply_recording_ui_contract(
+    contract: RecordingUiContract,
+    shared: &SharedState,
+    app: &AppHandle,
+) {
+    match contract {
+        RecordingUiContract::ShowCapsuleAndEmitStarted => {
+            set_capsule_phase(shared, "recording");
+            if let Some(win) = app.get_webview_window("capsule") {
+                position_capsule(&win);
+                let _ = win.show();
+            }
+            emit_capsule_event(app, "recording-started", ());
+        }
     }
 }
 
@@ -306,12 +342,11 @@ fn start_recording(app: AppHandle, shared: SharedState) {
         match audio.start(app.clone()) {
             Ok(_) => {
                 diag::write("event:start_recording:audio_started");
-                set_capsule_phase(&shared, "recording");
-                if let Some(win) = app.get_webview_window("capsule") {
-                    position_capsule(&win);
-                    let _ = win.show();
-                }
-                emit_capsule_event(&app, "recording-started", ());
+                apply_recording_ui_contract(
+                    RecordingUiContract::ShowCapsuleAndEmitStarted,
+                    &shared,
+                    &app,
+                );
                 diag::write("event:start_recording:emitted_recording_started");
             }
             Err(e) => {
@@ -343,16 +378,26 @@ fn start_recording(app: AppHandle, shared: SharedState) {
                 match start_action {
                     WindowsStartAction::EnterRecording => {
                         *shared2.windows_speech_session.lock().unwrap() = Some(session);
-                        set_capsule_phase(&shared2, "recording");
-                        if let Some(win) = app2.get_webview_window("capsule") {
-                            position_capsule(&win);
-                            let _ = win.show();
-                        }
-                        emit_capsule_event(&app2, "recording-started", ());
+                        apply_recording_ui_contract(
+                            recording_ui_contract(
+                                config::SttBackend::WindowsSpeech,
+                                WindowsStartAction::EnterRecording,
+                            ),
+                            &shared2,
+                            &app2,
+                        );
                         diag::write("event:start_recording:windows_started");
                     }
                     WindowsStartAction::StopImmediately => {
                         diag::write("event:start_recording:windows_quick_release");
+                        apply_recording_ui_contract(
+                            recording_ui_contract(
+                                config::SttBackend::WindowsSpeech,
+                                WindowsStartAction::StopImmediately,
+                            ),
+                            &shared2,
+                            &app2,
+                        );
                         announce_processing(&shared2, &app2);
                         let transcript = windows_stt::stop_recognition(session, &app2).await;
                         finish_windows_stop(&mut shared2.recording.lock().unwrap());
@@ -794,5 +839,16 @@ mod recording_state_tests {
             StartAction::IgnoreAlreadyRecording
         );
         assert_eq!(busy, RecordingState::WindowsRecording);
+    }
+
+    #[test]
+    fn quick_release_windows_path_still_establishes_recording_ui_contract() {
+        assert_eq!(
+            recording_ui_contract(
+                config::SttBackend::WindowsSpeech,
+                WindowsStartAction::StopImmediately
+            ),
+            RecordingUiContract::ShowCapsuleAndEmitStarted
+        );
     }
 }
