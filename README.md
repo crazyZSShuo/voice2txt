@@ -6,7 +6,8 @@ Windows system-tray voice input application. Hold **Right Alt** to record; relea
 
 - 🎙️ **Hold Right Alt** — records audio while held, transcribes on release
 - 🌊 **Live waveform** — RMS-driven bar animation during recording
-- 🌐 **OpenAI-compatible STT** — works with OpenAI Whisper, local whisper.cpp servers, or any compatible endpoint
+- 🪟 **Windows-native speech recognition** — default backend on Windows, with manual fallback to OpenAI-compatible Custom STT
+- 🌐 **OpenAI-compatible Custom STT** — works with OpenAI Whisper, local whisper.cpp servers, or any `/v1/audio/transcriptions` compatible endpoint
 - 🧠 **Optional LLM correction** — fixes ASR homophones (`配森` → `Python`) via streaming GPT
 - 💬 **Floating capsule HUD** — elegant no-border overlay at screen bottom
 - 🔒 **DPAPI-encrypted keys** — API keys stored encrypted via Windows DPAPI
@@ -71,13 +72,22 @@ Settings are stored at `%APPDATA%\VoiceInput\config.json`. API keys are encrypte
 
 ### STT (Speech-to-Text)
 
+VoiceInput supports two STT backends:
+
+| Backend | Default on Windows | Notes |
+|---|---|---|
+| `Windows SpeechRecognizer` | Yes | Uses Windows speech services and ignores the app language setting. |
+| `Custom STT` | No | Uses the configured `/v1/audio/transcriptions` endpoint and the app language setting. |
+
 | Field | Default | Notes |
 |---|---|---|
-| API Base URL | `https://api.openai.com` | OpenAI or any compatible server |
+| API Base URL | `https://api.openai.com` | Used by `Custom STT` |
 | API Key | _(required)_ | `sk-…` for OpenAI |
-| Model | `whisper-1` | or `large-v3` for local Whisper |
+| Model | `whisper-1` | Used by `Custom STT`; `large-v3` works for local Whisper |
 
-**Local Whisper**: run [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with its built-in server, then set Base URL to `http://localhost:8080`.
+**Windows SpeechRecognizer**: uses Windows speech services and ignores the app language setting.
+
+**Custom STT**: run [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with its built-in server, then set Base URL to `http://localhost:8080` or another OpenAI-compatible `/v1/audio/transcriptions` endpoint. This backend uses the app language setting.
 
 ### LLM Correction (optional)
 
