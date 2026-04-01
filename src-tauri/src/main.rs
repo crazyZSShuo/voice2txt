@@ -50,8 +50,18 @@ fn save_config(new_cfg: config::AppConfig, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-async fn test_stt(cfg: config::SttConfig) -> Result<String, String> {
-    stt::test_connection(&cfg).await.map_err(|e| e.to_string())
+async fn test_stt(cfg: config::AppConfig) -> Result<String, String> {
+    let backend = stt_router::selected_backend(&cfg);
+    stt_router::ensure_backend_supported(backend).map_err(|e| e.to_string())?;
+
+    match backend {
+        config::SttBackend::Custom => stt::test_connection(&cfg.stt)
+            .await
+            .map_err(|e| e.to_string()),
+        config::SttBackend::WindowsSpeech => windows_stt::test_connection()
+            .await
+            .map_err(|e| e.to_string()),
+    }
 }
 
 #[tauri::command]

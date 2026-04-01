@@ -9,6 +9,8 @@ interface SttConfig {
   model: string;
 }
 
+type SttBackend = "windows_speech" | "custom";
+
 interface LlmConfig {
   enabled: boolean;
   base_url: string;
@@ -19,6 +21,7 @@ interface LlmConfig {
 interface AppConfig {
   language: string;
   auto_start: boolean;
+  stt_backend: SttBackend;
   stt: SttConfig;
   llm: LlmConfig;
 }
@@ -199,7 +202,7 @@ export default function Settings() {
     setSttStatus("testing");
     setSttMsg("");
     try {
-      const msg = await invoke<string>("test_stt", { cfg: cfg.stt });
+      const msg = await invoke<string>("test_stt", { cfg });
       setSttMsg(msg);
       setSttStatus("ok");
     } catch (e) {
@@ -243,6 +246,40 @@ export default function Settings() {
 
       {/* STT Configuration */}
       <Section title="Speech-to-Text (STT)">
+        <Field label="Backend">
+          <select
+            value={cfg.stt_backend}
+            onChange={(e) => setCfg((c) => c && { ...c, stt_backend: e.target.value as SttBackend })}
+            style={{
+              flex: 1,
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 6,
+              padding: "6px 10px",
+              color: "#e8e8f0",
+              fontSize: 13,
+              fontFamily: "inherit",
+              outline: "none",
+              cursor: "pointer",
+            }}
+          >
+            <option value="windows_speech">Windows SpeechRecognizer</option>
+            <option value="custom">Custom STT</option>
+          </select>
+          <TestButton status={sttStatus} onClick={handleTestStt} />
+        </Field>
+        {cfg.stt_backend === "windows_speech" ? (
+          <div style={{
+            padding: "12px 16px",
+            fontSize: 12,
+            color: "rgba(220,220,240,0.75)",
+            borderBottom: "1px solid rgba(255,255,255,0.06)",
+            lineHeight: 1.5,
+          }}>
+            Recognition language is managed by Windows system speech settings.
+          </div>
+        ) : (
+          <>
         <Field label="API Base URL">
           <TextInput
             value={cfg.stt.base_url}
@@ -264,8 +301,9 @@ export default function Settings() {
             onChange={(v) => updateStt({ model: v })}
             placeholder="whisper-1"
           />
-          <TestButton status={sttStatus} onClick={handleTestStt} />
         </Field>
+          </>
+        )}
         {sttMsg && (
           <div style={{
             padding: "8px 16px",
@@ -352,6 +390,14 @@ export default function Settings() {
             <option value="ko">한국어 (ko)</option>
           </select>
         </Field>
+        <div style={{
+          padding: "0 16px 12px",
+          fontSize: 12,
+          color: "rgba(220,220,240,0.65)",
+          lineHeight: 1.5,
+        }}>
+          This language setting is only used by Custom STT.
+        </div>
       </Section>
 
       {/* Save button */}
