@@ -117,11 +117,38 @@ export default function Capsule() {
   const [show, setShow] = useState(false);
   const [lang, setLang] = useState("zh-CN");
   const phaseRef = useRef<Phase>("idle");
+  const hideTimerRef = useRef<number | null>(null);
 
   const go = (p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
     setShow(p !== "idle");
+  };
+
+  const clearHideTimer = () => {
+    if (hideTimerRef.current !== null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  };
+
+  const resetCapsule = () => {
+    clearHideTimer();
+    setTranscript("");
+    setErrorMsg("");
+    go("idle");
+  };
+
+  const scheduleReset = (delayMs: number, clearText: boolean) => {
+    clearHideTimer();
+    hideTimerRef.current = window.setTimeout(() => {
+      go("idle");
+      if (clearText) {
+        setTranscript("");
+        setErrorMsg("");
+      }
+      hideTimerRef.current = null;
+    }, delayMs);
   };
 
   // Language
@@ -141,25 +168,38 @@ export default function Capsule() {
       if (init !== "idle") go(init as Phase);
 
       subs.push(await listen("recording-started", () => {
-        setTranscript(""); setErrorMsg(""); go("recording");
+        clearHideTimer();
+        setTranscript("");
+        setErrorMsg("");
+        go("recording");
       }));
-      subs.push(await listen("processing-started", () => go("processing")));
+      subs.push(await listen("processing-started", () => {
+        setTranscript("");
+        setErrorMsg("");
+        go("processing");
+      }));
       subs.push(await listen("refining-started", () => go("refining")));
       subs.push(await listen("transcript-clear", () => setTranscript("")));
       subs.push(await listen<string>("transcript-chunk", (e) =>
         setTranscript((p) => p + e.payload)));
       subs.push(await listen<string>("llm-chunk", (e) =>
         setTranscript((p) => p + e.payload)));
+      subs.push(await listen("capsule-hide", () => resetCapsule()));
       subs.push(await listen<string>("recording-error", (e) => {
-        setErrorMsg(e.payload); go("error");
-        setTimeout(() => { go("idle"); setTimeout(() => setErrorMsg(""), 220); }, 1600);
+        clearHideTimer();
+        setErrorMsg(e.payload);
+        go("error");
+        scheduleReset(1600, true);
       }));
       subs.push(await listen("recording-done", () => {
         go("done");
-        setTimeout(() => { go("idle"); setTimeout(() => setTranscript(""), 220); }, 260);
+        scheduleReset(260, true);
       }));
     })();
-    return () => subs.forEach((u) => u());
+    return () => {
+      clearHideTimer();
+      subs.forEach((u) => u());
+    };
   }, []);
 
   // Polling fallback
@@ -174,11 +214,11 @@ export default function Capsule() {
   // ── Derived ────────────────────────────────────────────────────────────
 
   const text =
-    transcript
-    || (phase === "recording" ? "正在聆听…" : "")
+    (phase === "recording" ? (transcript || "正在聆听…") : "")
     || (phase === "processing" ? "正在转写…" : "")
     || (phase === "refining" ? "正在润色…" : "")
-    || (phase === "error" ? errorMsg : "");
+    || (phase === "error" ? errorMsg : "")
+    || transcript;
 
   // Fixed parts: padL(20) + dot(8) + gap(10) + wave(44) + gapR(14) + pillPadL(0) + pill(~58) + padR(18) ≈ 172px
   // Text adds ~12px per character

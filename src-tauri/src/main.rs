@@ -81,11 +81,15 @@ fn capsule_frontend_log(message: String) {
     diag::write(&format!("capsule:frontend:{}", message));
 }
 
+fn capsule_window_dimensions(width: u32) -> (f64, f64) {
+    (width.clamp(260, 620) as f64, 56.0)
+}
+
 #[tauri::command]
 fn sync_capsule_window(width: u32, app: AppHandle) -> Result<(), String> {
-    let width = width.clamp(260, 620);
+    let (width, height) = capsule_window_dimensions(width);
     if let Some(win) = app.get_webview_window("capsule") {
-        win.set_size(tauri::PhysicalSize::new(width, 56))
+        win.set_size(tauri::LogicalSize::new(width, height))
             .map_err(|e| e.to_string())?;
         position_capsule(&win);
         apply_capsule_shape(&win);
@@ -256,6 +260,20 @@ fn apply_recording_ui_contract(
     }
 }
 
+fn close_capsule_ui(shared: &SharedState, app: &AppHandle) {
+    set_capsule_phase(shared, "idle");
+    emit_capsule_event(app, "capsule-hide", ());
+    hide_capsule(app);
+}
+
+fn should_surface_windows_start_error(state: RecordingState) -> bool {
+    !matches!(state, RecordingState::WindowsStopRequested | RecordingState::WindowsStopping)
+}
+
+fn should_close_visible_capsule_on_ignored_stop(phase: &str) -> bool {
+    phase != "idle"
+}
+
 fn announce_processing(shared: &SharedState, app: &AppHandle) {
     diag::write("event:stop_recording:task_started");
     set_capsule_phase(shared, "processing");
@@ -275,16 +293,17 @@ async fn finalize_recording(
             diag::write(&format!("event:stt:error:{}", e));
             log::error!("STT: {}", e);
             emit_capsule_event(&app, "recording-error", e.to_string());
-            hide_capsule(&app);
+            tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+            close_capsule_ui(&shared, &app);
             return;
         }
     };
     diag::write(&format!("event:stt:done:chars={}", transcript.len()));
+    diag::write_text("event:stt:final_text", &transcript);
 
     if transcript.trim().is_empty() {
         diag::write("event:stt:empty_transcript");
-        set_capsule_phase(&shared, "idle");
-        hide_capsule(&app);
+        close_capsule_ui(&shared, &app);
         return;
     }
 
@@ -296,6 +315,7 @@ async fn finalize_recording(
         match llm::refine_transcript(&transcript, &cfg.llm, &app).await {
             Ok(r) if !r.trim().is_empty() => {
                 diag::write(&format!("event:llm:done:chars={}", r.len()));
+                diag::write_text("event:llm:final_text", &r);
                 r
             }
             _ => {
@@ -315,16 +335,15 @@ async fn finalize_recording(
         diag::write(&format!("event:inject:error:{}", e));
         log::error!("Inject: {}", e);
         emit_capsule_event(&app, "recording-error", e.to_string());
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
     } else {
         diag::write("event:inject:done");
         set_capsule_phase(&shared, "done");
         emit_capsule_event(&app, "recording-done", final_text.clone());
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
-    hide_capsule(&app);
+    close_capsule_ui(&shared, &app);
     diag::write("event:stop_recording:task_finished");
-    set_capsule_phase(&shared, "idle");
 }
 
 fn start_recording(app: AppHandle, shared: SharedState) {
@@ -376,6 +395,8 @@ fn start_recording(app: AppHandle, shared: SharedState) {
         return;
     }
 
+    apply_recording_ui_contract(RecordingUiContract::ShowCapsuleAndEmitStarted, &shared, &app);
+
     let app2 = app.clone();
     let shared2 = shared.clone();
     let cfg2 = cfg.clone();
@@ -390,26 +411,10 @@ fn start_recording(app: AppHandle, shared: SharedState) {
                 match start_action {
                     WindowsStartAction::EnterRecording => {
                         *shared2.windows_speech_session.lock().unwrap() = Some(session);
-                        apply_recording_ui_contract(
-                            recording_ui_contract(
-                                config::SttBackend::WindowsSpeech,
-                                WindowsStartAction::EnterRecording,
-                            ),
-                            &shared2,
-                            &app2,
-                        );
                         diag::write("event:start_recording:windows_started");
                     }
                     WindowsStartAction::StopImmediately => {
                         diag::write("event:start_recording:windows_quick_release");
-                        apply_recording_ui_contract(
-                            recording_ui_contract(
-                                config::SttBackend::WindowsSpeech,
-                                WindowsStartAction::StopImmediately,
-                            ),
-                            &shared2,
-                            &app2,
-                        );
                         announce_processing(&shared2, &app2);
                         let transcript = windows_stt::stop_recognition(session, &app2).await;
                         finish_windows_stop(&mut shared2.recording.lock().unwrap());
@@ -418,15 +423,20 @@ fn start_recording(app: AppHandle, shared: SharedState) {
                 }
             }
             Err(e) => {
-                reset_recording_state(&mut shared2.recording.lock().unwrap());
-                set_capsule_phase(&shared2, "error");
-                diag::write(&format!("event:start_recording:error:{}", e));
-                log::error!("Windows speech start: {}", e);
-                if let Some(win) = app2.get_webview_window("capsule") {
-                    position_capsule(&win);
-                    let _ = win.show();
+                let should_surface_error = {
+                    let mut recording = shared2.recording.lock().unwrap();
+                    let current = *recording;
+                    reset_recording_state(&mut recording);
+                    should_surface_windows_start_error(current)
+                };
+                diag::write(&format!("event:start_recording:error:{:#}", e));
+                log::error!("Windows speech start: {:#}", e);
+                if should_surface_error {
+                    set_capsule_phase(&shared2, "error");
+                    emit_capsule_event(&app2, "recording-error", e.to_string());
+                } else {
+                    close_capsule_ui(&shared2, &app2);
                 }
-                emit_capsule_event(&app2, "recording-error", e.to_string());
             }
         }
     });
@@ -443,6 +453,14 @@ fn stop_recording(app: AppHandle, shared: SharedState) {
         action
     };
     if matches!(stop_action, StopAction::IgnoreNotRecording) {
+        let should_close = {
+            let phase = shared.capsule_phase.lock().unwrap().clone();
+            should_close_visible_capsule_on_ignored_stop(&phase)
+        };
+        if should_close {
+            diag::write("event:stop_recording:closing_visible_capsule");
+            close_capsule_ui(&shared, &app);
+        }
         return;
     }
 
@@ -493,7 +511,11 @@ fn stop_recording(app: AppHandle, shared: SharedState) {
 fn hide_capsule(app: &AppHandle) {
     diag::write("event:capsule:hide");
     if let Some(win) = app.get_webview_window("capsule") {
+        let was_visible = win.is_visible().unwrap_or(true);
+        diag::write(&format!("event:capsule:hide:was_visible={}", was_visible));
         let _ = win.hide();
+        let is_visible = win.is_visible().unwrap_or(false);
+        diag::write(&format!("event:capsule:hide:is_visible={}", is_visible));
     }
 }
 
@@ -862,5 +884,25 @@ mod recording_state_tests {
             ),
             RecordingUiContract::ShowCapsuleAndEmitStarted
         );
+    }
+
+    #[test]
+    fn windows_start_errors_stay_hidden_after_release() {
+        assert!(!should_surface_windows_start_error(
+            RecordingState::WindowsStopRequested
+        ));
+    }
+
+    #[test]
+    fn ignored_stop_closes_visible_capsule() {
+        assert!(should_close_visible_capsule_on_ignored_stop("error"));
+        assert!(!should_close_visible_capsule_on_ignored_stop("idle"));
+    }
+
+    #[test]
+    fn capsule_window_dimensions_clamp_to_logical_bounds() {
+        assert_eq!(capsule_window_dimensions(120), (260.0, 56.0));
+        assert_eq!(capsule_window_dimensions(480), (480.0, 56.0));
+        assert_eq!(capsule_window_dimensions(900), (620.0, 56.0));
     }
 }

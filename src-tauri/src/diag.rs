@@ -27,8 +27,26 @@ pub fn write(event: &str) {
     }
 }
 
+pub fn flatten_text(text: &str) -> String {
+    text.replace('\r', "\\r").replace('\n', "\\n")
+}
+
+pub fn write_text(event: &str, text: &str) {
+    write(&format!("{}:{}", event, flatten_text(text)));
+}
+
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         write(&format!("panic: {}", info));
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flatten_text;
+
+    #[test]
+    fn flatten_text_escapes_newlines() {
+        assert_eq!(flatten_text("hello\r\nworld"), "hello\\r\\nworld");
+    }
 }

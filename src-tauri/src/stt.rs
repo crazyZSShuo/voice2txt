@@ -61,6 +61,7 @@ pub async fn transcribe(
     // (For streaming-capable APIs, this could be emitted word-by-word)
     if !text.is_empty() {
         let _ = app.emit("transcript-chunk", &text);
+        crate::diag::write_text("event:stt:text", &text);
     }
 
     Ok(text)
@@ -132,12 +133,14 @@ pub async fn transcribe_streaming(
             let text = json["text"].as_str().unwrap_or(&body).trim().to_string();
             if !text.is_empty() {
                 let _ = app.emit("transcript-chunk", &text);
+                crate::diag::write_text("event:stt:text", &text);
             }
             return Ok(text);
         }
         let text = body.trim().to_string();
         if !text.is_empty() {
             let _ = app.emit("transcript-chunk", &text);
+            crate::diag::write_text("event:stt:text", &text);
         }
         return Ok(text);
     }
@@ -160,6 +163,7 @@ pub async fn transcribe_streaming(
                     if let Some(delta) = json["delta"].as_str() {
                         full_text.push_str(delta);
                         let _ = app.emit("transcript-chunk", delta);
+                        crate::diag::write_text("event:stt:chunk", delta);
                     }
                 }
             }

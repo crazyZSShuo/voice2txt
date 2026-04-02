@@ -1,5 +1,7 @@
 use anyhow::{bail, Result};
 use tauri::AppHandle;
+use tokio::sync::oneshot;
+use tokio::time::{timeout, Duration};
 
 #[cfg(target_os = "windows")]
 use anyhow::{anyhow, Context};
@@ -9,9 +11,6 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 use tauri::Emitter;
-
-#[cfg(target_os = "windows")]
-use tokio::sync::oneshot;
 
 #[cfg(target_os = "windows")]
 use windows::{
@@ -25,6 +24,9 @@ use windows::{
 
 #[cfg(target_os = "windows")]
 type CompletionSignal = Arc<Mutex<Option<oneshot::Sender<std::result::Result<(), String>>>>>;
+
+const STOP_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+const SPEECH_PRIVACY_POLICY_ERROR_HEX: &str = "0x80045509";
 
 #[cfg(target_os = "windows")]
 pub struct WindowsSpeechSession {
@@ -62,6 +64,26 @@ fn signal_completion(completion_tx: &CompletionSignal, outcome: std::result::Res
     if let Some(tx) = completion_tx.lock().unwrap().take() {
         let _ = tx.send(outcome);
     }
+}
+
+async fn await_completion_signal(
+    completion_rx: oneshot::Receiver<std::result::Result<(), String>>,
+) -> Result<std::result::Result<(), String>> {
+    timeout(STOP_COMPLETION_TIMEOUT, completion_rx)
+        .await
+        .map_err(|_| anyhow::anyhow!("Windows speech recognition stop timed out"))?
+        .map_err(|_| anyhow::anyhow!("Windows speech completion signal was dropped"))
+}
+
+fn friendly_windows_startup_error(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("speech privacy policy was not accepted")
+        || lower.contains(&SPEECH_PRIVACY_POLICY_ERROR_HEX.to_ascii_lowercase())
+    {
+        return "Windows SpeechRecognizer cannot start because the Windows speech privacy policy has not been accepted yet. Open Windows Settings > Privacy & security > Speech and turn on Online speech recognition, then retry.".to_string();
+    }
+
+    message.to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -158,6 +180,7 @@ pub async fn start_recognition(app: &AppHandle) -> Result<WindowsSpeechSession> 
 
             let _ = app_for_results.emit("transcript-chunk", chunk.to_string());
             crate::diag::write(&format!("event:windows_stt:chunk:chars={}", chunk.len()));
+            crate::diag::write_text("event:windows_stt:text", chunk);
             Ok(())
         }))
         .context("attach Windows speech ResultGenerated handler")?;
@@ -202,7 +225,7 @@ pub async fn start_recognition(app: &AppHandle) -> Result<WindowsSpeechSession> 
         let _ = recognition_session.RemoveResultGenerated(result_generated_token);
         let _ = recognition_session.RemoveCompleted(completed_token);
         let _ = recognizer.Close();
-        return Err(err);
+        return Err(anyhow!(friendly_windows_startup_error(&err.to_string())));
     }
 
     crate::diag::write("event:windows_stt:start");
@@ -240,9 +263,7 @@ pub async fn stop_recognition(session: WindowsSpeechSession, _app: &AppHandle) -
         .context("wait for Windows speech recognition stop");
 
     let completion_result = match stop_result {
-        Ok(()) => completion_rx
-            .await
-            .map_err(|_| anyhow!("Windows speech completion signal was dropped"))?,
+        Ok(()) => await_completion_signal(completion_rx).await?,
         Err(err) => {
             let _ = recognition_session.RemoveResultGenerated(result_generated_token);
             let _ = recognition_session.RemoveCompleted(completed_token);
@@ -288,4 +309,56 @@ pub async fn test_connection() -> Result<String> {
 #[cfg(not(target_os = "windows"))]
 pub async fn test_connection() -> Result<String> {
     bail!("Windows SpeechRecognizer is only available on Windows builds")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{await_completion_signal, friendly_windows_startup_error};
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn completion_signal_returns_success() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(())).unwrap();
+
+        let outcome = await_completion_signal(rx).await.unwrap();
+
+        assert!(outcome.is_ok());
+    }
+
+    #[tokio::test]
+    async fn completion_signal_returns_backend_error() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err("backend failed".to_string())).unwrap();
+
+        let outcome = await_completion_signal(rx).await.unwrap();
+
+        assert_eq!(outcome.unwrap_err(), "backend failed");
+    }
+
+    #[tokio::test]
+    async fn completion_signal_times_out_when_event_never_arrives() {
+        let (_tx, rx) = oneshot::channel::<std::result::Result<(), String>>();
+
+        let err = await_completion_signal(rx).await.unwrap_err();
+
+        assert_eq!(err.to_string(), "Windows speech recognition stop timed out");
+    }
+
+    #[test]
+    fn startup_error_maps_speech_privacy_policy_failure() {
+        let message = "start Windows continuous recognition: The speech privacy policy was not accepted prior to attempting a speech recognition. (0x80045509)";
+
+        let friendly = friendly_windows_startup_error(message);
+
+        assert!(friendly.contains("Privacy & security > Speech"));
+        assert!(friendly.contains("Online speech recognition"));
+    }
+
+    #[test]
+    fn startup_error_leaves_other_messages_unchanged() {
+        let message = "start Windows continuous recognition: Something else failed";
+
+        assert_eq!(friendly_windows_startup_error(message), message);
+    }
 }

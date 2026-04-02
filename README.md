@@ -163,5 +163,8 @@ WebView2 may need reinstalling. Run: `winget install Microsoft.EdgeWebView2Runti
 **STT returns empty**
 Check your microphone permissions in Windows Settings → Privacy → Microphone.
 
+**Windows SpeechRecognizer fails with `0x80045509`**
+Windows has not accepted the speech privacy policy yet. Open Windows Settings → Privacy & security → Speech, turn on Online speech recognition, then retry.
+
 **Acrylic blur not showing (Windows 10)**
 Windows 10 acrylic support is limited. The CSS `backdrop-filter` fallback provides a subtle blur effect.
