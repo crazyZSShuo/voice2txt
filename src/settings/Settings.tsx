@@ -165,6 +165,7 @@ export default function Settings() {
   const [sttStatus, setSttStatus] = useState<TestStatus>("idle");
   const [llmStatus, setLlmStatus] = useState<TestStatus>("idle");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveMsg, setSaveMsg] = useState("");
   const [sttMsg, setSttMsg] = useState("");
   const [llmMsg, setLlmMsg] = useState("");
   const sttTestGeneration = useRef(0);
@@ -195,12 +196,15 @@ export default function Settings() {
 
   const handleSave = async () => {
     setSaveStatus("saving");
+    setSaveMsg("");
     try {
       await invoke("save_config", { newCfg: cfg });
       setSaveStatus("saved");
+      setSaveMsg("");
       setTimeout(() => setSaveStatus("idle"), 2000);
-    } catch {
+    } catch (e) {
       setSaveStatus("error");
+      setSaveMsg(String(e));
       setTimeout(() => setSaveStatus("idle"), 3000);
     }
   };
@@ -455,6 +459,17 @@ export default function Settings() {
             : "Save"}
         </button>
       </div>
+      {saveStatus === "error" && saveMsg && (
+        <p style={{
+          marginTop: 10,
+          fontSize: 12,
+          color: "#ff8888",
+          textAlign: "right",
+          lineHeight: 1.5,
+        }}>
+          {saveMsg}
+        </p>
+      )}
 
       {/* Footer note */}
       <p style={{
