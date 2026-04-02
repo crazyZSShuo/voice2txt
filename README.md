@@ -49,7 +49,7 @@ npm install
 .\build.ps1 dev
 ```
 
-Then open **Settings** from the tray icon and configure your STT API key.
+Then open **Settings** from the tray icon. If you use `Custom STT`, configure its API key and endpoint there; if you use `Windows SpeechRecognizer`, no STT API key is required.
 
 ---
 
@@ -82,7 +82,7 @@ VoiceInput supports two STT backends:
 | Field | Default | Notes |
 |---|---|---|
 | API Base URL | `https://api.openai.com` | Used by `Custom STT` |
-| API Key | _(required)_ | `sk-…` for OpenAI |
+| API Key | _(optional)_ | Required only for `Custom STT` (for example `sk-…` with OpenAI) |
 | Model | `whisper-1` | Used by `Custom STT`; `large-v3` works for local Whisper |
 
 **Windows SpeechRecognizer**: uses Windows speech services and ignores the app language setting.
